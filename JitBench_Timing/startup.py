@@ -37,7 +37,7 @@ def parse_num_from_string (str):
     
     return -1
 
-def parse_output (inFileName):
+def parse_output (inFileName, suffix):
     startups = []
     requests = []
     minSteadyState = []
@@ -68,11 +68,11 @@ def parse_output (inFileName):
             len(avgSteadyState) != len(startups):
         error('Error parsing data, missing data detected') 
 
-    create_csv_file(startups, 'startup.txt', 'JitBenchStartupTime')
-    create_csv_file(requests, 'request.txt', 'JitBenchRequestTime')
-    create_csv_file(minSteadyState, 'minSteadyState.txt', 'JitBenchRequestMinimumSteadyStateTime')
-    create_csv_file(maxSteadyState, 'maxSteadyState.txt', 'JitBenchRequestMaximumSteadyStateTime')
-    create_csv_file(avgSteadyState, 'avgSteadyState.txt', 'JitBenchRequestAverageSteadyStateTime')
+    create_csv_file(startups, 'startup' + suffix + '.txt', 'JitBenchStartupTime' + suffix)
+    create_csv_file(requests, 'request' + suffix + '.txt', 'JitBenchRequestTime' + suffix)
+    create_csv_file(minSteadyState, 'minSteadyState' + suffix + '.txt', 'JitBenchRequestMinimumSteadyStateTime' + suffix)
+    create_csv_file(maxSteadyState, 'maxSteadyState' + suffix + '.txt', 'JitBenchRequestMaximumSteadyStateTime' + suffix)
+    create_csv_file(avgSteadyState, 'avgSteadyState' + suffix + '.txt', 'JitBenchRequestAverageSteadyStateTime' + suffix)
 
 def copy_file(curName, newName):
     print('copying {} to {}'.format(curName, newName))
@@ -120,80 +120,90 @@ def prepare_coreclr(config):
 def prepare_jitbench(config):
     startDir = os.getcwd()
     jitBenchDir = os.path.join(startDir, 'JitBench')
-    
-    if os.path.isdir(jitBenchDir):
-        os.chdir(jitBenchDir)
-        run_command('git pull')
-        os.chdir(startDir)
-    else:
-        run_command('git clone -b dev https://github.com/davmason/JitBench')
+
+    if config['SetupJitBench']:
+        if os.path.isdir(jitBenchDir):
+            os.chdir(jitBenchDir)
+            run_command('git pull')
+            os.chdir(startDir)
+        else:
+            run_command('git clone -b dev https://github.com/davmason/JitBench')
 
     if not os.path.isdir(jitBenchDir):
         error('JitBench folder does not exist')
 
     os.chdir(jitBenchDir)
 
-    # Get the latest shared runtime and SDK
-    # TODO: ability to change architecture
-    archStr = config['Arch']
-    run_command('powershell .\\Dotnet-Install.ps1 -SharedRuntime -InstallDir .dotnet -Channel master -Architecture {}'.format(archStr))
-    run_command('powershell .\\Dotnet-Install.ps1 -InstallDir .dotnet -Channel master -Architecture {}'.format(archStr))
+    if config['SetupJitBench']:
+        # Get the latest shared runtime and SDK
+        # TODO: ability to change architecture
+        archStr = config['Arch']
+        run_command('powershell .\\Dotnet-Install.ps1 -SharedRuntime -InstallDir .dotnet -Channel master -Architecture {}'.format(archStr))
+        run_command('powershell .\\Dotnet-Install.ps1 -InstallDir .dotnet -Channel master -Architecture {}'.format(archStr))
     
     # Add new dotnet to path
     os.environ['PATH'] = os.path.join(os.getcwd(), '.dotnet') + os.pathsep + os.environ['PATH']
     
     run_command('dotnet --info')
 
-    os.chdir(os.path.join('src', 'MusicStore'))
+    if config['SetupJitBench']:
+        os.chdir(os.path.join('src', 'MusicStore'))
+    
+        # Restore the MusicStore project
+        run_command('dotnet restore')
 
-    # Restore the MusicStore project
-    run_command('dotnet restore')
+        # Modify shared runtime with local built copy
+        sharedRuntimeDir = os.path.join(jitBenchDir, '.dotnet', 'shared', 'Microsoft.NETCore.App')
+        patched = False
+        crossgenPath = ''
+        for item in os.listdir(sharedRuntimeDir):
+            targetRuntimeDir = os.path.join(sharedRuntimeDir, item)
+            print('considering item {}'.format(targetRuntimeDir))
+            if os.path.isdir(targetRuntimeDir) and item.startswith('2.0'):
+                print('patching shared runtime dir {} with {}'.format(targetRuntimeDir, config['CoreCLRBinPath']))
+                patch_coreclr_files(config['CoreCLRBinPath'], targetRuntimeDir)
+                patched = True
+                crossgenPath = os.path.join(targetRuntimeDir, 'crossgen.exe')
 
-    # Modify shared runtime with local built copy
-    sharedRuntimeDir = os.path.join(jitBenchDir, '.dotnet', 'shared', 'Microsoft.NETCore.App')
-    patched = False
-    crossgenPath = ''
-    for item in os.listdir(sharedRuntimeDir):
-        targetRuntimeDir = os.path.join(sharedRuntimeDir, item)
-        print('considering item {}'.format(targetRuntimeDir))
-        if os.path.isdir(targetRuntimeDir) and item.startswith('2.0'):
-            print('patching shared runtime dir {} with {}'.format(targetRuntimeDir, config['CoreCLRBinPath']))
-            patch_coreclr_files(config['CoreCLRBinPath'], targetRuntimeDir)
-            patched = True
-            crossgenPath = os.path.join(targetRuntimeDir, 'crossgen.exe')
+        if not patched:
+            error('did not find a dotnet version to patch')
 
-    if not patched:
-        error('did not find a dotnet version to patch')
+        # publish the App
+        run_command('dotnet publish -c Release -f netcoreapp20')
 
-    # publish the App
-    run_command('dotnet publish -c Release -f netcoreapp20')
+        os.chdir(os.path.join('bin', 'Release', 'netcoreapp20', 'publish'))
 
-    os.chdir(os.path.join('bin', 'Release', 'netcoreapp20', 'publish'))
-
-    # Crossgen all the framework assemblies
-    run_command('powershell .\\Invoke-Crossgen.ps1 -crossgen_path {}'.format(crossgenPath))
+        # Crossgen all the framework assemblies
+        run_command('powershell .\\Invoke-Crossgen.ps1 -crossgen_path {}'.format(crossgenPath))
     
     os.chdir(startDir)
 
 
-def run_jitbench(config):
+def run_jitbench(config, tiered):
     startDir = os.getcwd()
 
     targetDir = os.path.join('JitBench', 'src', 'MusicStore', 'bin', 'Release', 'netcoreapp20', 'publish')
     os.chdir(targetDir)
 
-    targetCommand = 'dotnet MusicStore.dll' 
+    targetCommand = 'dotnet MusicStore.dll'
+
+    if tiered:
+        os.environ['COMPLUS_EXPERIMENTAL_TieredCompilation']='1'
+    else:
+        os.environ['COMPLUS_EXPERIMENTAL_TieredCompilation']='0'
 
     # Warmup the scenario
     if run_command(targetCommand) != 0:
         error('Running MusicStore failed')
 
+    output_filename = 'output_tiered.txt' if tiered else 'output.txt'
     for i in range(0, 100):
-        if run_command(targetCommand, 'output.txt') != 0:
+        if run_command(targetCommand, output_filename) != 0:
             error('Running MusicStore failed')
 
-    curName = os.path.join(os.getcwd(), 'output.txt')
-    newName = os.path.join(startDir, 'output.txt')
+    
+    curName = os.path.join(os.getcwd(), output_filename)
+    newName = os.path.join(startDir, output_filename)
     copy_file(curName, newName)
 
     os.chdir(startDir)
@@ -201,13 +211,14 @@ def run_jitbench(config):
 
 def parse_config():
     workingDir = os.environ['WORKSPACE']
-    config = { 'Arch': 'x64', 'OS': 'Windows_NT', 'CoreCLRBinPath': '', 'Workspace': workingDir, 'LocalRun': False}
+    config = { 'Arch': 'x64', 'OS': 'Windows_NT', 'CoreCLRBinPath': '', 'Workspace': workingDir, 'LocalRun': False, 'SetupJitBench': True}
     
     parser = argparse.ArgumentParser(description='Patches JitBench with a local CLR and runs basic timings')
     parser.add_argument('--os', help='Operating system to target (Windows or Linux)')
     parser.add_argument('--arch', help='Architecture to target (x86 or x64)')
     parser.add_argument('--coreclrbinpath', help='path to coreclr binaries to run JitBench (e.g. D:\\coreclr\\bin\\product\\Windows_NT.x64.Release\\)')
     parser.add_argument('--workspace', help='Local directory to clone JitBench in to')
+    parser.add_argument('--setupjitbench', help='Set to false if you want to skip enlisting\building\crossgening JitBench')
     
     args = parser.parse_args()
 
@@ -226,6 +237,8 @@ def parse_config():
     if args.coreclrbinpath != None:
         config['CoreCLRBinPath'] = args.coreclrbinpath
         config['LocalRun'] = True
+    if args.setupjitbench != None:
+        config['SetupJitBench'] = False
     if args.workspace != None:
         config['Workspace'] = args.workspace
 
@@ -255,7 +268,10 @@ if __name__ == '__main__':
     if not os.path.isdir(coreClrBinPath):
         error('CoreCLR bin path {} does not exist'.format(coreClrBinPath))
 
+    
     prepare_jitbench(config)
-    fileName = run_jitbench(config)
-    parse_output(fileName)
+    tieredFileName = run_jitbench(config, True)
+    parse_output(tieredFileName, '_TieredCompilation')
+    fileName = run_jitbench(config, False)
+    parse_output(fileName, '')
     sys.exit(0)
